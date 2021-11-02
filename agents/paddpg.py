@@ -373,7 +373,7 @@ class PADDPGAgent(Agent):
         assert len(action) == self.num_actions+self.action_parameter_size
         self.replay_memory.append(state, action, reward, next_state, terminal)
 
-    def _optimize_td_loss(self):
+    def _optimize_td_loss(self, writer=None, step=None):
         if self.replay_memory.nb_entries < self.batch_size or \
                 self.replay_memory.nb_entries < self.initial_memory_threshold:
             return
@@ -435,7 +435,9 @@ class PADDPGAgent(Agent):
         out = -torch.mul(delta_a, action_params)
         self.actor.zero_grad()
         out.backward(torch.ones(out.shape).to(device))
-
+        if writer & step:
+            writer.add_scalar('Loss Critic', loss_critic, step)
+            writer.add_scalar('Q-Value', Q_val, step)
         if self.clip_grad > 0:
             torch.nn.utils.clip_grad_norm_(self.actor.parameters(), self.clip_grad)
         self.actor_optimiser.step()
