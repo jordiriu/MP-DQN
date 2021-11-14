@@ -12,18 +12,15 @@ from qibo.symbols import Z
 from gym_universal.classical_hamiltonians import MaxCutHamiltonian
 
 from gym.wrappers import Monitor
+import torch
 from tqdm import tqdm
 from torch.utils.tensorboard import SummaryWriter
 
 
 from common import ClickPythonLiteralOption
-from common.soccer_domain import SoccerScaledParameterisedActionWrapper, kill_soccer_server
 from agents.paddpg import PADDPGAgent
 
-# Define gate set as Ry,Rz,CNOT
-
-# Number of actions will be 2*N + N*(N-1) + 1 for the measure gate, number of parameters is 2*N
-
+# device = torch.device("cpu")
 
 def pad_action(act, act_param, qubits):
 
@@ -82,7 +79,7 @@ def evaluate(env, agent, qubits, episodes=10):
 
 @click.command()
 @click.option('--seed', default=0, help='Random seed.', type=int)
-@click.option('--episodes', default=30000, help='Number of epsiodes.', type=int)
+@click.option('--episodes', default=150000, help='Number of epsiodes.', type=int)
 @click.option('--evaluation-episodes', default=1000, help='Episodes over which to evaluate after training.', type=int)
 @click.option('--update-ratio', default=0.1, help='Ratio of updates to samples.', type=float)
 @click.option('--batch-size', default=32, help='Minibatch size.', type=int)
@@ -92,29 +89,29 @@ def evaluate(env, agent, qubits, episodes=10):
               help='Use inverting gradients scheme instead of squashing function.', type=bool)
 @click.option('--initial-memory-threshold', default=1000, help='Number of transitions required to start learning.',
               type=int)
-@click.option('--use-ornstein-noise', default=False,
+@click.option('--use-ornstein-noise', default=True,
               help='Use Ornstein noise instead of epsilon-greedy with uniform random exploration.', type=bool)
-@click.option('--replay-memory-size', default=500000, help='Replay memory size in transitions.', type=int)
+@click.option('--replay-memory-size', default=400000, help='Replay memory size in transitions.', type=int)
 @click.option('--epsilon-steps', default=1000, help='Number of episodes over which to linearly anneal epsilon.',
               type=int)
 @click.option('--epsilon-final', default=0.1, help='Final epsilon value.', type=float)
-@click.option('--tau', default=0.001, help='Soft target network update averaging factor.', type=float)
-@click.option('--learning-rate-actor', default=0.001, help="Actor network learning rate.", type=float)
-@click.option('--learning-rate-critic', default=0.001, help="Critic network learning rate.", type=float)
+@click.option('--tau', default=0.0001, help='Soft target network update averaging factor.', type=float)
+@click.option('--learning-rate-actor', default=0.0001, help="Actor network learning rate.", type=float)
+@click.option('--learning-rate-critic', default=0.0001, help="Critic network learning rate.", type=float)
 @click.option('--clip-grad', default=1., help="Gradient clipping.", type=float)  # default 10
 @click.option('--n-step-returns', default=True, help="Use n-step returns.", type=bool)
 @click.option('--scale-actions', default=True, help="Scale actions.", type=bool)
-@click.option('--layers', default="[1024,512,256,128]", help='Duplicate action-parameter inputs.',
+@click.option('--layers', default="[256,256,256,256]", help='Duplicate action-parameter inputs.',
               cls=ClickPythonLiteralOption)
 @click.option('--save-dir', default="results/MaxCut", help='Output directory.', type=str)
 @click.option('--title', default="PADDPG", help="Prefix of output files", type=str)
 def run(seed, episodes, batch_size, gamma, beta, use_ornstein_noise, inverting_gradients, initial_memory_threshold,
         replay_memory_size, tau, learning_rate_actor, learning_rate_critic, epsilon_steps, epsilon_final,
         n_step_returns, clip_grad, scale_actions, layers, evaluation_episodes, update_ratio, save_dir, title):
+    
     writer = SummaryWriter()
-    qbits = 8
+    qbits = 10
 
-    counter = 0
     non_ordered_clauses = []
     for i in range(qbits):
         if i < qbits-1:
@@ -127,17 +124,13 @@ def run(seed, episodes, batch_size, gamma, beta, use_ornstein_noise, inverting_g
                   [SymbolicHamiltonian(-Z(clause[0]) * Z(clause[1]))
                    for clause in non_ordered_clauses]
     hamiltonian = MaxCutHamiltonian(non_ordered_clauses)
+    max_depth = 10
+    max_steps = qbits*max_depth
     env = gym.make('universal-v1', qbits=qbits, shots=1000, allowed_gates={RZ, RY, CNOT, M}, ham=hamiltonian,
-                   obs=observables)
-
-    '''
-    if scale_actions:
-        env = SoccerScaledParameterisedActionWrapper(env)
-    '''
+                   obs=observables, max_depth=max_depth)
 
     dir = os.path.join(save_dir, title)
     env = Monitor(env, directory=os.path.join(dir, str(seed)), video_callable=False, write_upon_reset=False, force=True)
-    # env.seed(seed)
     np.random.seed(seed)
 
     new_params = [spaces.Box(low=0, high=2*np.pi, shape=(1,), dtype=np.float32) for i in range(1, 2 * qbits + 1)]
@@ -151,8 +144,8 @@ def run(seed, episodes, batch_size, gamma, beta, use_ornstein_noise, inverting_g
                         critic_kwargs={'hidden_layers': layers, 'init_type': "kaiming", 'init_std': 0.01,
                                        'activation': 'leaky_relu'},
                         batch_size=batch_size,
-                        learning_rate_actor=learning_rate_actor,  # 0.0001
-                        learning_rate_critic=learning_rate_critic,  # 0.001
+                        learning_rate_actor=learning_rate_actor,
+                        learning_rate_critic=learning_rate_critic,
                         gamma=gamma,  # 0.99
                         tau_actor=tau,
                         tau_critic=tau,
@@ -168,11 +161,9 @@ def run(seed, episodes, batch_size, gamma, beta, use_ornstein_noise, inverting_g
                         adam_betas=(0.9, 0.999),  # default 0.95,0.999
                         seed=seed)
     print(agent)
-    max_steps = 400
     total_reward = 0.
     returns = []
     timesteps = []
-    goals = []
     start_time_train = time.time()
 
     for i in tqdm(range(episodes)):
@@ -182,12 +173,13 @@ def run(seed, episodes, batch_size, gamma, beta, use_ornstein_noise, inverting_g
         state = np.array(state, dtype=np.float32, copy=False)
 
         act, act_param, all_actions, all_action_parameters = agent.act(state)
+        # writer.add_scalars('first step action', dict([(str(j), all_actions[j]) for j in range(all_actions.shape[0])]), i)
         action = pad_action(act, act_param, env.circuit.nqubits)
 
         episode_reward = 0.
         agent.start_episode()
         transitions = []
-        for j in range(max_steps):
+        for j in range(max_steps+1):
             ret = env.step(action)
             next_state, reward, terminal, info = ret
             next_state = np.array(next_state, dtype=np.float32, copy=False)
@@ -215,8 +207,10 @@ def run(seed, episodes, batch_size, gamma, beta, use_ornstein_noise, inverting_g
             # env.render()
 
             if terminal:
-                writer.add_scalar('Measurement Weight', all_actions[-1], i)
                 writer.add_scalar('Episode Steps', j, i)
+                writer.add_scalar('Energy', env.env.env.current_energy, i)
+                writer.add_scalar('Max_Energy', env.env.env.max_energy, i)
+                writer.add_scalar('Minimum Depth', env.env.env.min_depth, i)
                 break
         agent.end_episode()
 
@@ -228,12 +222,8 @@ def run(seed, episodes, batch_size, gamma, beta, use_ornstein_noise, inverting_g
                 agent.replay_memory.append(state=t[0], action=t[1], reward=t[2], next_state=t[3], next_action=t[4],
                                            terminal=t[5], time_steps=None, n_step_return=nsr)
 
-        n_updates = int(update_ratio * j)
-        for _ in range(n_updates):
-            counter +=1
-            agent._optimize_td_loss(writer, counter)
-
-        writer.add_scalar('Reward', episode_reward, i)
+        agent._optimize_td_loss(writer, i)
+        writer.add_scalar('Reward', np.array(episode_reward), i)
 
         returns.append(episode_reward)
         timesteps.append(j)

@@ -11,7 +11,7 @@ from agents.agent import Agent
 from agents.memory.memory import Memory, MemoryNStepReturns
 from agents.utils import soft_update_target_network, hard_update_target_network
 from agents.utils.noise import OrnsteinUhlenbeckActionNoise
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+device = torch.device( "cpu")
 
 
 class Critic(nn.Module):
@@ -343,7 +343,7 @@ class PADDPGAgent(Agent):
 
             # Hausknecht and Stone [2016] use epsilon greedy actions with uniform random action-parameter exploration
             if self.np_random.uniform() < self.epsilon:
-                all_actions = self.np_random.uniform(size=all_actions.shape)
+                action = np.random.randint(0, all_actions.shape[0])
                 offsets = np.array([self.action_parameter_sizes[i] for i in range(self.num_actions)], dtype=int).cumsum()
                 offsets = np.concatenate((np.array([0]), offsets))
                 if not self.use_ornstein_noise:
@@ -352,8 +352,10 @@ class PADDPGAgent(Agent):
                             self.action_parameter_min_numpy[offsets[i]:offsets[i+1]],
                             self.action_parameter_max_numpy[offsets[i]:offsets[i+1]])
 
+            else:
+                action = np.argmax(all_actions)
+
             # select maximum action
-            action = np.argmax(all_actions)
             offset = np.array([self.action_parameter_sizes[i] for i in range(action)], dtype=int).sum()
             if self.use_ornstein_noise and self.noise is not None:
                 all_action_parameters[offset:offset + self.action_parameter_sizes[action]] += self.noise.sample()[offset:offset + self.action_parameter_sizes[action]]
@@ -435,7 +437,7 @@ class PADDPGAgent(Agent):
         out = -torch.mul(delta_a, action_params)
         self.actor.zero_grad()
         out.backward(torch.ones(out.shape).to(device))
-        if writer & step:
+        if (writer is not None) & (step is not None):
             writer.add_scalar('Loss Critic', loss_critic, step)
             writer.add_scalar('Q-Value', Q_val, step)
         if self.clip_grad > 0:
