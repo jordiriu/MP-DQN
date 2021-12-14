@@ -5,10 +5,11 @@ import time
 import gym
 from gym import spaces
 import numpy as np
+from dataclasses import dataclass
 
 from qibo.gates import CNOT, RZ, RY, M
 from qibo.hamiltonians import SymbolicHamiltonian
-from qibo.symbols import Z
+from qibo.symbols import Z, X
 from gym_universal.classical_hamiltonians import MaxCutHamiltonian
 
 from gym.wrappers import Monitor
@@ -21,152 +22,153 @@ from common import ClickPythonLiteralOption
 from agents.paddpg import PADDPGAgent
 
 # device = torch.device("cpu")
+@dataclass
+class InstanceConfig:
+
+    seed: int = 50000
+    episodes: int = 70000
+    evaluation_episodes: int = 1
+    update_ratio: float = 0.1
+    batch_size: int = 32
+    gamma: float = 0.85
+    beta: float = 0.2
+    inverting_gradients: bool = True
+    initial_memory_threshold: int = 1000
+    use_ornstein_noise: bool = True
+    replay_memory_size: int = 80000
+    epsilon_steps: int = 1000
+    epsilon_final: float = 0.05
+    tau: float = 0.0001
+    learning_rate_actor: float = 0.0001
+    learning_rate_critic: float = 0.0001
+    clip_grad: float = 1.
+    n_step_returns: bool = True
+    scale_actions: bool = True
+    layers = [256,256,256,256]
+    save_dir: str = 'results/MaxCut'
+    title: str = 'PADDPG'
+    '''
+    edges = [[0, 1], [0, 11], [1, 2], [1, 11], [2, 3], [2, 10], [2, 11],
+                           [3, 4], [3, 9], [3, 10], [4, 5], [4, 8], [4, 9], [5, 6], 
+                           [5, 7], [5, 8], [6, 7], [7, 8], [8, 9], [9, 10], [10, 11],
+                           [6,12], [12,13], [7,12], [7,13]]
+    '''
+    edges =  [[0,1], [1,2], [2,3], [3,4], [4,5], [5,6], [6,7], [0,7], [0,6], [1,6], [1,5], [2,5], [2,4]]
+    qbits: int = 8
+    max_depth: int = 10
+    instance_name: str = 'chordal'
+    observables: str = None
+
+    @property
+    def path(self):
+        if self.observables:
+            return 'runs/'+self.instance_name+'/'+str(self.qbits)+'_qubits/'+str(config.seed)+'_seed/'+str(config.observables)+'/'
+        else:
+            return 'runs/'+self.instance_name+'/'+str(self.qbits)+'_qubits/'+str(config.seed)+'_seed/'
+    
+
 
 def pad_action(act, act_param, qubits):
 
-    if act == 2*qubits + qubits*(qubits-1):
-        return M(*(q for q in range(qubits)))
+    if act == 0:
+        qubit = np.argmax(act_param[:-1])
+        action = RY(qubit, theta=act_param[-1])
+    
+    elif act == 1:
+        qubit = np.argmax(act_param[:-1])
+        action = RZ(qubit, theta=act_param[-1])
 
-    gate_type = act//qubits
-
-    if gate_type == 0:
-        qubit = act % qubits
-        action = RY(qubit, theta=act_param[0])
-
-    elif gate_type == 1:
-        qubit = act % qubits
-        action = RZ(qubit, theta=act_param[0])
-
-    else:
-        target_qubits = []
-        for i in range(qubits):
-            for j in range(qubits):
-                if i != j:
-                    target_qubits += [j]
-
-        control_qubit = (act-2*qubits)//(qubits-1)
-        target_qubit = target_qubits[act-2*qubits]
-
+    elif act == 2:
+        control_qubit, target_qubit = tuple(np.argsort(act_param)[-2:])
         action = CNOT(control_qubit, target_qubit)
+    
+    else:
+        action = M(*(q for q in range(qubits)))
 
     return action
 
 
-def evaluate(env, agent, qubits, episodes=10):
+def evaluate(env, agent, qubits, path, episodes=10):
     returns = []
     timesteps = []
-    flag = 0
-    for _ in range(episodes):
-        state = env.reset()
-        terminal = False
-        t = 0
-        total_reward = 0.
-        while not terminal:
-            t += 1
-            state = np.array(state, dtype=np.float32, copy=False)
-            act, act_param, all_actions, all_action_parameters = agent.act(state)
-            action = pad_action(act, act_param, qubits)
-            state, reward, terminal, info = env.step(action)
-            total_reward += reward
-        timesteps.append(t)
-        if flag == 0:
-            print(env.circuit.draw())
-            flag = 1
-        returns.append(total_reward)
+    with open(path+'/results.txt', 'w+') as f:
+        for _ in range(episodes):
+            state = env.reset()
+            terminal = False
+            t = 0
+            total_reward = 0.
+            while not terminal:
+                t += 1
+                state = np.array(state, dtype=np.float32, copy=False)
+                act, act_param, all_actions, all_action_parameters = agent.act(state)
+                action = pad_action(act, act_param, qubits)
+                print('Output Action {} with parameters {}'.format(action,act_param), file=f)
+                state, reward, terminal, info = env.step(action)
+                total_reward += reward
+            timesteps.append(t)
+            
+            print(env.circuit.draw(), file=f)
+                
+            returns.append(total_reward)
+    
+        print(f'Energy: {env.current_energy}', file=f)
 
     return np.column_stack((returns, timesteps))
 
 
-@click.command()
-@click.option('--seed', default=0, help='Random seed.', type=int)
-@click.option('--episodes', default=150000, help='Number of epsiodes.', type=int)
-@click.option('--evaluation-episodes', default=1000, help='Episodes over which to evaluate after training.', type=int)
-@click.option('--update-ratio', default=0.1, help='Ratio of updates to samples.', type=float)
-@click.option('--batch-size', default=32, help='Minibatch size.', type=int)
-@click.option('--gamma', default=0.99, help='Discount factor.', type=float)
-@click.option('--beta', default=0.2, help='Averaging factor for on-policy and off-policy targets.', type=float)
-@click.option('--inverting-gradients', default=True,
-              help='Use inverting gradients scheme instead of squashing function.', type=bool)
-@click.option('--initial-memory-threshold', default=1000, help='Number of transitions required to start learning.',
-              type=int)
-@click.option('--use-ornstein-noise', default=True,
-              help='Use Ornstein noise instead of epsilon-greedy with uniform random exploration.', type=bool)
-@click.option('--replay-memory-size', default=400000, help='Replay memory size in transitions.', type=int)
-@click.option('--epsilon-steps', default=1000, help='Number of episodes over which to linearly anneal epsilon.',
-              type=int)
-@click.option('--epsilon-final', default=0.1, help='Final epsilon value.', type=float)
-@click.option('--tau', default=0.0001, help='Soft target network update averaging factor.', type=float)
-@click.option('--learning-rate-actor', default=0.0001, help="Actor network learning rate.", type=float)
-@click.option('--learning-rate-critic', default=0.0001, help="Critic network learning rate.", type=float)
-@click.option('--clip-grad', default=1., help="Gradient clipping.", type=float)  # default 10
-@click.option('--n-step-returns', default=True, help="Use n-step returns.", type=bool)
-@click.option('--scale-actions', default=True, help="Scale actions.", type=bool)
-@click.option('--layers', default="[256,256,256,256]", help='Duplicate action-parameter inputs.',
-              cls=ClickPythonLiteralOption)
-@click.option('--save-dir', default="results/MaxCut", help='Output directory.', type=str)
-@click.option('--title', default="PADDPG", help="Prefix of output files", type=str)
-def run(seed, episodes, batch_size, gamma, beta, use_ornstein_noise, inverting_gradients, initial_memory_threshold,
-        replay_memory_size, tau, learning_rate_actor, learning_rate_critic, epsilon_steps, epsilon_final,
-        n_step_returns, clip_grad, scale_actions, layers, evaluation_episodes, update_ratio, save_dir, title):
+
+def run(config: InstanceConfig):
     
-    writer = SummaryWriter()
-    qbits = 10
+    writer = SummaryWriter(log_dir=config.path)
+    observables = [SymbolicHamiltonian(-Z(clause[0]) * Z(clause[1])) for clause in config.edges]
 
-    non_ordered_clauses = []
-    for i in range(qbits):
-        if i < qbits-1:
-            clause = [i, i+1]
-        else:
-            clause = [0, i]
-        non_ordered_clauses.append(clause)
 
-    observables = [SymbolicHamiltonian(Z(q)) for q in range(qbits)] + \
-                  [SymbolicHamiltonian(-Z(clause[0]) * Z(clause[1]))
-                   for clause in non_ordered_clauses]
-    hamiltonian = MaxCutHamiltonian(non_ordered_clauses)
-    max_depth = 10
-    max_steps = qbits*max_depth
-    env = gym.make('universal-v1', qbits=qbits, shots=1000, allowed_gates={RZ, RY, CNOT, M}, ham=hamiltonian,
-                   obs=observables, max_depth=max_depth)
+    hamiltonian = MaxCutHamiltonian(config.edges)
+    print('Maximum Cut Attainable {}'.format(hamiltonian.brute_force_solution()[0]))
+    max_steps = config.qbits*config.max_depth
+    allowed_gates = {RZ, RY, CNOT, M}
+    env = gym.make('universal-v1', qbits=config.qbits, shots=1000, allowed_gates=allowed_gates, ham=hamiltonian,
+                   obs=observables, max_depth=config.max_depth)
 
-    dir = os.path.join(save_dir, title)
-    env = Monitor(env, directory=os.path.join(dir, str(seed)), video_callable=False, write_upon_reset=False, force=True)
-    np.random.seed(seed)
+    dir = os.path.join(config.save_dir, config.title)
+    env = Monitor(env, directory=os.path.join(dir, str(config.seed)), video_callable=False, write_upon_reset=False, force=True)
+    np.random.seed(config.seed)
 
-    new_params = [spaces.Box(low=0, high=2*np.pi, shape=(1,), dtype=np.float32) for i in range(1, 2 * qbits + 1)]
-    new_params += [spaces.Box(low=0, high=2*np.pi, shape=(0,), dtype=np.float32) for i in range(1, qbits*(qbits-1) + 2)]
+    new_params = [spaces.Box(low=0, high=2*np.pi, shape=(config.qbits+1,), dtype=np.float32) for i in range(2)]
+    new_params += [spaces.Box(low=0, high=2*np.pi, shape=(config.qbits,), dtype=np.float32)]
+    new_params += [spaces.Box(low=0, high=2*np.pi, shape=(0,), dtype=np.float32)]
 
-    action_space = spaces.Tuple((spaces.Discrete(2 * qbits + qbits * (qbits - 1) + 1), *new_params))
+    action_space = spaces.Tuple((spaces.Discrete(len(allowed_gates)),*new_params))
 
     agent = PADDPGAgent(env.observation_space, action_space,
-                        actor_kwargs={'hidden_layers': layers, 'init_type': "kaiming", 'init_std': 0.01,
+                        actor_kwargs={'hidden_layers': config.layers, 'init_type': "kaiming", 'init_std': 0.01,
                                       'activation': 'leaky_relu'},
-                        critic_kwargs={'hidden_layers': layers, 'init_type': "kaiming", 'init_std': 0.01,
+                        critic_kwargs={'hidden_layers': config.layers, 'init_type': "kaiming", 'init_std': 0.01,
                                        'activation': 'leaky_relu'},
-                        batch_size=batch_size,
-                        learning_rate_actor=learning_rate_actor,
-                        learning_rate_critic=learning_rate_critic,
-                        gamma=gamma,  # 0.99
-                        tau_actor=tau,
-                        tau_critic=tau,
-                        n_step_returns=n_step_returns,
-                        epsilon_steps=epsilon_steps,
-                        epsilon_final=epsilon_final,
-                        replay_memory_size=replay_memory_size,
-                        inverting_gradients=inverting_gradients,
-                        initial_memory_threshold=initial_memory_threshold,
-                        beta=beta,
-                        clip_grad=clip_grad,
-                        use_ornstein_noise=use_ornstein_noise,
-                        adam_betas=(0.9, 0.999),  # default 0.95,0.999
-                        seed=seed)
+                        batch_size=config.batch_size,
+                        learning_rate_actor=config.learning_rate_actor,
+                        learning_rate_critic=config.learning_rate_critic,
+                        gamma=config.gamma,  # 0.99
+                        tau_actor=config.tau,
+                        tau_critic=config.tau,
+                        n_step_returns=config.n_step_returns,
+                        epsilon_steps=config.epsilon_steps,
+                        epsilon_final=config.epsilon_final,
+                        replay_memory_size=config.replay_memory_size,
+                        inverting_gradients=config.inverting_gradients,
+                        initial_memory_threshold=config.initial_memory_threshold,
+                        beta=config.beta,
+                        clip_grad=config.clip_grad,
+                        use_ornstein_noise=config.use_ornstein_noise,
+                        adam_betas=(0.95, 0.999),  # default 0.95,0.999
+                        seed=config.seed)
     print(agent)
     total_reward = 0.
     returns = []
     timesteps = []
     start_time_train = time.time()
 
-    for i in tqdm(range(episodes)):
+    for i in tqdm(range(config.episodes)):
 
         info = {'status': "NOT_SET"}
         state = env.reset()
@@ -188,7 +190,7 @@ def run(seed, episodes, batch_size, gamma, beta, use_ornstein_noise, inverting_g
             next_action = pad_action(next_act, next_act_param, env.circuit.nqubits)
 
             # don't add individual steps, so we can calculate n-step returns at the end...
-            if n_step_returns:
+            if config.n_step_returns:
                 transitions.append(
                     [state, np.concatenate((all_actions.data, all_action_parameters.data)).ravel(), reward,
                      next_state, np.concatenate((next_all_actions.data,
@@ -211,12 +213,14 @@ def run(seed, episodes, batch_size, gamma, beta, use_ornstein_noise, inverting_g
                 writer.add_scalar('Energy', env.env.env.current_energy, i)
                 writer.add_scalar('Max_Energy', env.env.env.max_energy, i)
                 writer.add_scalar('Minimum Depth', env.env.env.min_depth, i)
+                writer.add_scalar('Depth', env.env.env.circuit.depth, i)
+
                 break
         agent.end_episode()
 
         # calculate n-step returns
-        if n_step_returns:
-            nsreturns = compute_n_step_returns(transitions, gamma)
+        if config.n_step_returns:
+            nsreturns = compute_n_step_returns(transitions, config.gamma)
             for t, nsr in zip(transitions, nsreturns):
                 t.append(nsr)
                 agent.replay_memory.append(state=t[0], action=t[1], reward=t[2], next_state=t[3], next_action=t[4],
@@ -224,6 +228,8 @@ def run(seed, episodes, batch_size, gamma, beta, use_ornstein_noise, inverting_g
 
         agent._optimize_td_loss(writer, i)
         writer.add_scalar('Reward', np.array(episode_reward), i)
+        writer.add_scalar('Average Entanglement Entropy', np.mean(np.array(info['entropy'])), i)
+        writer.add_scalar('Max Entanglement Entropy', np.max(np.array(info['entropy'])), i)
 
         returns.append(episode_reward)
         timesteps.append(j)
@@ -234,21 +240,21 @@ def run(seed, episodes, batch_size, gamma, beta, use_ornstein_noise, inverting_g
     end_time_train = time.time()
 
     returns = env.get_episode_rewards()
-    np.save(os.path.join(dir, title + "{}".format(str(seed))), np.column_stack((returns, timesteps)))
+    np.save(os.path.join(dir, config.title + "{}".format(str(config.seed))), np.column_stack((returns, timesteps)))
 
-    if evaluation_episodes > 0:
-        print("Evaluating agent over {} episodes".format(evaluation_episodes))
+    if config.evaluation_episodes > 0:
+        print("Evaluating agent over {} episodes".format(config.evaluation_episodes))
         agent.epsilon_final = 0.
         agent.epsilon = 0.
         agent.noise = None
         agent.actor.eval()
         agent.critic.eval()
         start_time_eval = time.time()
-        evaluation_results = evaluate(env, agent, qbits, evaluation_episodes)  # returns, timesteps, goals
+        evaluation_results = evaluate(env, agent, config.qbits, config.path, config.evaluation_episodes)  # returns, timesteps, goals
         end_time_eval = time.time()
         print("Ave. evaluation return =", sum(evaluation_results[:, 0]) / evaluation_results.shape[0])
         print("Ave. timesteps =", sum(evaluation_results[:, 1]) / evaluation_results.shape[0])
-        np.save(os.path.join(dir, title + "{}e".format(str(seed))), evaluation_results)
+        np.save(os.path.join(dir, config.title + "{}e".format(str(config.seed))), evaluation_results)
         print("Evaluation time: %.2f seconds" % (end_time_eval - start_time_eval))
     print("Training time: %.2f seconds" % (end_time_train - start_time_train))
 
@@ -268,5 +274,6 @@ def compute_n_step_returns(episode_transitions, gamma):
 
 
 if __name__ == '__main__':
-    run()
+    config = InstanceConfig(seed=50000, observables='batch_size_128/one_to_all_entropy')
+    run(config)
 
