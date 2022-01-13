@@ -11,8 +11,7 @@ from agents.agent import Agent
 from agents.memory.memory import Memory, MemoryNStepReturns
 from agents.utils import soft_update_target_network, hard_update_target_network
 from agents.utils.noise import OrnsteinUhlenbeckActionNoise
-device = torch.device( "cpu")
-
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 class Critic(nn.Module):
 

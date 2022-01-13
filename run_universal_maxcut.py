@@ -8,7 +8,7 @@ import numpy as np
 from dataclasses import dataclass
 
 from qibo.gates import CNOT, RZ, RY, M
-from qibo.hamiltonians import SymbolicHamiltonian
+from qibo.hamiltonians import SymbolicHamiltonian, Hamiltonian
 from qibo.symbols import Z, X
 from gym_universal.classical_hamiltonians import MaxCutHamiltonian
 
@@ -30,7 +30,7 @@ class InstanceConfig:
     evaluation_episodes: int = 1
     update_ratio: float = 0.1
     batch_size: int = 32
-    gamma: float = 0.85
+    gamma: float = 0.99
     beta: float = 0.2
     inverting_gradients: bool = True
     initial_memory_threshold: int = 1000
@@ -39,12 +39,12 @@ class InstanceConfig:
     epsilon_steps: int = 1000
     epsilon_final: float = 0.05
     tau: float = 0.0001
-    learning_rate_actor: float = 0.0001
-    learning_rate_critic: float = 0.0001
+    learning_rate_actor: float = 0.002
+    learning_rate_critic: float = 0.002
     clip_grad: float = 1.
     n_step_returns: bool = True
     scale_actions: bool = True
-    layers = [256,256,256,256]
+    layers = [256,256,256]
     save_dir: str = 'results/MaxCut'
     title: str = 'PADDPG'
     '''
@@ -52,17 +52,20 @@ class InstanceConfig:
                            [3, 4], [3, 9], [3, 10], [4, 5], [4, 8], [4, 9], [5, 6], 
                            [5, 7], [5, 8], [6, 7], [7, 8], [8, 9], [9, 10], [10, 11],
                            [6,12], [12,13], [7,12], [7,13]]
-    '''
+
     edges =  [[0,1], [1,2], [2,3], [3,4], [4,5], [5,6], [6,7], [0,7], [0,6], [1,6], [1,5], [2,5], [2,4]]
-    qbits: int = 8
+    '''
+    
+    edges =  [[0,1], [1,2], [2,3], [3,4], [4,5], [0,5], [0,4], [1,4], [1,3]]
+    qbits: int = 6
     max_depth: int = 10
     instance_name: str = 'chordal'
-    observables: str = None
+    train_id: str = ''
 
     @property
     def path(self):
-        if self.observables:
-            return 'runs/'+self.instance_name+'/'+str(self.qbits)+'_qubits/'+str(config.seed)+'_seed/'+str(config.observables)+'/'
+        if self.train_id:
+            return 'runs/'+self.instance_name+'/'+str(self.qbits)+'_qubits/'+str(config.seed)+'_seed/'+str(config.train_id)+'/'
         else:
             return 'runs/'+self.instance_name+'/'+str(self.qbits)+'_qubits/'+str(config.seed)+'_seed/'
     
@@ -122,8 +125,11 @@ def run(config: InstanceConfig):
     writer = SummaryWriter(log_dir=config.path)
     observables = [SymbolicHamiltonian(-Z(clause[0]) * Z(clause[1])) for clause in config.edges]
 
+    field = 0.0
+    hamiltonian = MaxCutHamiltonian(config.edges, field)
+    gs = Hamiltonian.from_symbolic(hamiltonian.symbolic_hamiltonian().form, hamiltonian.symbolic_hamiltonian().symbol_map).eigenvalues()
+    print('Max Energy {}'.format(gs[0]))
 
-    hamiltonian = MaxCutHamiltonian(config.edges)
     print('Maximum Cut Attainable {}'.format(hamiltonian.brute_force_solution()[0]))
     max_steps = config.qbits*config.max_depth
     allowed_gates = {RZ, RY, CNOT, M}
@@ -274,6 +280,6 @@ def compute_n_step_returns(episode_transitions, gamma):
 
 
 if __name__ == '__main__':
-    config = InstanceConfig(seed=50000, observables='batch_size_128/one_to_all_entropy')
+    config = InstanceConfig(seed=2000000, train_id='initial_superposition', episodes=15000)
     run(config)
 
